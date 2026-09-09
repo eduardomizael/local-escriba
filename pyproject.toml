@@ -1,0 +1,18 @@
+[project]
+name = "local-escriba"
+version = "0.1.0"
+description = "Transcricao local de audio e video com faster-whisper, acelerada por GPU"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "Leonardo" }]
+license = { text = "MIT" }
+dependencies = [
+    "faster-whisper>=1.1.0",
+    # Wheels de CUDA da NVIDIA: evitam instalar o CUDA Toolkit na maquina.
+    # Nao existem para macOS, onde a transcricao roda em CPU.
+    "nvidia-cublas-cu12>=12.4; sys_platform != 'darwin'",
+    "nvidia-cudnn-cu12>=9.1; sys_platform != 'darwin'",
+]
+
+[tool.uv]
+package = false
