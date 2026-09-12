@@ -6,6 +6,7 @@ Transcreve audio e video com faster-whisper, usando a GPU quando disponivel.
     uv run transcribe.py                          # varre a pasta atual
     uv run transcribe.py video.mp4 --output output
     uv run transcribe.py --input D:/videos --model medium
+    uv run transcribe.py entrevista.mp3 --start 660 --end 930
 
 Gera .json (segmentos + tempos), .txt e .srt. Por padrao ao lado de cada
 arquivo de midia; com --output, na pasta indicada.
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -78,14 +80,13 @@ def setup_cuda() -> None:
 
 setup_cuda()
 
-try:
-    from faster_whisper import WhisperModel
-except ImportError:
-    sys.exit("Dependencias ausentes. Rode 'uv sync' nesta pasta primeiro.")
-
-
 def load_model(name: str):
     """Carrega o modelo na primeira configuracao de dispositivo que funcionar."""
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        sys.exit("Dependencias ausentes. Rode 'uv sync' nesta pasta primeiro.")
+
     for device, compute_type in DEVICE_FALLBACKS:
         try:
             model = WhisperModel(name, device=device, compute_type=compute_type)
@@ -117,12 +118,149 @@ def find_media(folder: str) -> list[Path]:
     )
 
 
+def parse_time(value: str) -> float:
+    """Aceita segundos ou um horário no formato HH:MM:SS[.mmm]."""
+    if ":" not in value:
+        try:
+            return float(value)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(
+                "must be seconds or HH:MM:SS"
+            ) from error
+
+    parts = value.split(":")
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("must be seconds or HH:MM:SS")
+
+    hours, minutes, seconds = parts
+    try:
+        if not hours.isdigit() or not minutes.isdigit():
+            raise ValueError
+        hours_value = int(hours)
+        minutes_value = int(minutes)
+        seconds_value = float(seconds)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "must be seconds or HH:MM:SS"
+        ) from error
+
+    if minutes_value >= 60 or not 0 <= seconds_value < 60:
+        raise argparse.ArgumentTypeError("minutes and seconds must be below 60")
+    return hours_value * 3600 + minutes_value * 60 + seconds_value
+
+
+def clip_timestamps(start: float | None, end: float | None) -> str | None:
+    """Converte limites opcionais para o formato aceito pelo faster-whisper."""
+    if start is None and end is None:
+        return None
+
+    values = [0.0 if start is None else start]
+    if end is not None:
+        values.append(end)
+    return ",".join(f"{value:g}" for value in values)
+
+
+def range_suffix(start: float | None, end: float | None) -> str:
+    """Cria um sufixo estável para evitar colisões entre transcrições parciais."""
+    parts = []
+    if start is not None:
+        parts.append(f"start-{start:g}")
+    if end is not None:
+        parts.append(f"end-{end:g}")
+    return "" if not parts else "__" + "__".join(parts)
+
+
+def validate_range(parser: argparse.ArgumentParser,
+                   start: float | None, end: float | None) -> None:
+    """Valida limites que independem da duração da mídia."""
+    if start is not None and not math.isfinite(start):
+        parser.error("--start must be a finite number")
+    if end is not None and not math.isfinite(end):
+        parser.error("--end must be a finite number")
+    if start is not None and start < 0:
+        parser.error("--start must be greater than or equal to zero")
+    if end is not None and end < 0:
+        parser.error("--end must be greater than or equal to zero")
+    if start is not None and end is not None and end <= start:
+        parser.error("--end must be greater than --start")
+
+
+def decode_audio_range(media: Path, start: float | None, end: float | None,
+                       sampling_rate: int = 16000):
+    """Decodifica somente o intervalo solicitado, preservando a duração original.
+
+    O ``clip_timestamps`` do faster-whisper limita a inferência, mas a versão
+    usada pelo projeto ainda calcula o espectrograma completo antes do corte.
+    Aqui o PyAV busca e decodifica apenas a faixa solicitada, evitando esse
+    consumo de memória em gravações longas.
+    """
+    try:
+        import av
+        import numpy as np
+    except ImportError:
+        sys.exit("Dependencias ausentes. Rode 'uv sync' nesta pasta primeiro.")
+
+    with av.open(str(media), mode="r", metadata_errors="ignore") as container:
+        try:
+            stream = container.streams.audio[0]
+        except IndexError as error:
+            raise ValueError("No audio stream found in the media") from error
+
+        if container.duration is not None:
+            source_duration = float(container.duration / av.time_base)
+        elif stream.duration is not None:
+            source_duration = float(stream.duration * stream.time_base)
+        else:
+            raise ValueError("Could not determine the media duration")
+
+        clip_start = 0.0 if start is None else start
+        clip_end = source_duration if end is None else end
+        if clip_start >= source_duration:
+            raise ValueError(f"--start ({clip_start:g}) must be before the end of the media "
+                             f"({source_duration:.2f}s)")
+        if clip_end > source_duration:
+            raise ValueError(f"--end ({clip_end:g}) exceeds the media duration "
+                             f"({source_duration:.2f}s)")
+
+        if clip_start > 0:
+            container.seek(int(clip_start * av.time_base), backward=True)
+
+        resampler = av.audio.resampler.AudioResampler(
+            format="s16", layout="mono", rate=sampling_rate,
+        )
+        chunks = []
+        reached_end = False
+        for decoded in container.decode(stream):
+            for frame in resampler.resample(decoded):
+                if frame.time is None:
+                    continue
+                frame_start = float(frame.time)
+                frame_end = frame_start + frame.samples / frame.sample_rate
+                if frame_end <= clip_start:
+                    continue
+                if frame_start >= clip_end:
+                    reached_end = True
+                    break
+                first = max(0, int(round((clip_start - frame_start) * frame.sample_rate)))
+                last = min(frame.samples, int(round((clip_end - frame_start) * frame.sample_rate)))
+                if last > first:
+                    chunks.append(frame.to_ndarray()[..., first:last].reshape(-1).copy())
+            if reached_end:
+                break
+
+    if not chunks:
+        raise ValueError("No audio samples found in the requested range")
+    audio = np.concatenate(chunks).astype(np.float32) / 32768.0
+    return audio, source_duration, clip_start, clip_end
+
+
 def transcribe_file(model, media: Path, model_name: str,
-                    output_dir: Path | None, language: str | None) -> None:
+                    output_dir: Path | None, language: str | None,
+                    start: float | None = None, end: float | None = None) -> None:
     """Transcreve um arquivo e grava .json, .txt e .srt. Pula se o .json existir."""
     destination = output_dir if output_dir is not None else media.parent
     destination.mkdir(parents=True, exist_ok=True)
-    base = destination / media.stem
+    base = destination / f"{media.stem}{range_suffix(start, end)}"
     json_target = base.with_suffix(".json")
     if output_dir is not None:
         print(f"  saida em: {destination}")
@@ -132,14 +270,38 @@ def transcribe_file(model, media: Path, model_name: str,
 
     print(f"\n=== {media.name}")
     started = time.time()
-    segments, info = model.transcribe(
-        str(media),
+    timestamps = clip_timestamps(start, end)
+    source_duration = None
+    range_start = 0.0 if start is None else start
+    range_end = None
+    audio = str(media)
+    if timestamps is not None:
+        audio, source_duration, range_start, range_end = decode_audio_range(
+            media, start, end,
+        )
+    transcribe_options = dict(
         language=language,
         vad_filter=True,
         beam_size=5,
         condition_on_previous_text=False,
     )
-    print(f"  duracao: {info.duration / 60:.0f} min  |  idioma: {info.language}")
+    segments, info = model.transcribe(
+        audio,
+        **transcribe_options,
+    )
+    if source_duration is None:
+        source_duration = info.duration
+    if range_end is None:
+        range_end = source_duration
+    range_duration = range_end - range_start
+    if timestamps is None:
+        print(f"  duracao da midia: {source_duration / 60:.0f} min"
+              f"  |  idioma: {info.language}")
+    else:
+        print(f"  duracao da midia: {source_duration / 60:.0f} min"
+              f"  |  intervalo: {timestamp(range_start, '.')[:8]} -> "
+              f"{timestamp(range_end, '.')[:8]} ({range_duration / 60:.1f} min)"
+              f"  |  idioma: {info.language}")
 
     rows: list[dict] = []
     last_report = 0.0
@@ -148,21 +310,25 @@ def transcribe_file(model, media: Path, model_name: str,
     tmp_txt = base.with_suffix(".txt.parcial")
     tmp_srt = base.with_suffix(".srt.parcial")
     with open(tmp_txt, "w", encoding="utf-8") as f_txt, \
-         open(tmp_srt, "w", encoding="utf-8") as f_srt:
+        open(tmp_srt, "w", encoding="utf-8") as f_srt:
         for index, segment in enumerate(segments, 1):
             text = segment.text.strip()
-            rows.append({"i": index, "start": round(segment.start, 2),
-                         "end": round(segment.end, 2), "text": text})
-            f_txt.write(f"[{timestamp(segment.start, '.')[:8]}] {text}\n")
-            f_srt.write(f"{index}\n{timestamp(segment.start)} --> "
-                        f"{timestamp(segment.end)}\n{text}\n\n")
-            if segment.end - last_report >= PROGRESS_INTERVAL_S:
-                last_report = segment.end
+            segment_start = segment.start + range_start
+            segment_end = segment.end + range_start
+            rows.append({"i": index, "start": round(segment_start, 2),
+                         "end": round(segment_end, 2), "text": text})
+            f_txt.write(f"[{timestamp(segment_start, '.')[:8]}] {text}\n")
+            f_srt.write(f"{index}\n{timestamp(segment_start)} --> "
+                        f"{timestamp(segment_end)}\n{text}\n\n")
+            processed = max(segment_end - range_start, 0.0)
+            if processed - last_report >= PROGRESS_INTERVAL_S:
+                last_report = processed
                 elapsed = max(time.time() - started, 1e-6)
-                speed = max(segment.end / elapsed, 1e-6)
-                pct = 100 * segment.end / info.duration if info.duration else 0
-                remaining = max(info.duration - segment.end, 0) / speed / 60
-                print(f"  {pct:5.1f}%  |  {segment.end / 60:5.0f} min de audio"
+                speed = max(processed / elapsed, 1e-6)
+                pct = 100 * processed / range_duration if range_duration else 0
+                remaining = max(range_end - segment_end, 0) / speed / 60
+                print(f"  {pct:5.1f}%  |  {processed / 60:4.1f} / "
+                      f"{range_duration / 60:.1f} min do intervalo"
                       f"  |  {speed:5.1f}x tempo real"
                       f"  |  faltam ~{remaining:.0f} min")
 
@@ -170,16 +336,21 @@ def transcribe_file(model, media: Path, model_name: str,
     tmp_srt.replace(base.with_suffix(".srt"))
     json_target.write_text(
         json.dumps({"file": media.name,
-                    "duration_s": round(info.duration, 1),
+                    "duration_s": round(source_duration, 1),
                     "model": model_name,
                     "language": info.language,
+                    "requested_range_s": (
+                        None if timestamps is None else {"start": start, "end": end}
+                    ),
                     "segments": rows}, ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
-    print(f"[pronto] {len(rows)} segmentos em {(time.time() - started) / 60:.1f} min")
+    scope = "da mídia completa" if timestamps is None else f"do intervalo de {range_duration / 60:.1f} min"
+    print(f"[pronto] {len(rows)} segmentos {scope} em "
+          f"{(time.time() - started) / 60:.1f} min")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Transcreve audio e video com faster-whisper.")
     parser.add_argument("files", nargs="*",
@@ -192,7 +363,17 @@ def main() -> None:
                         help="pasta onde gravar .json/.txt/.srt (padrao: junto da midia)")
     parser.add_argument("--language", default="pt",
                         help="codigo do idioma, ex.: pt, en, es. Use 'auto' para detectar")
+    parser.add_argument("--start", type=parse_time, default=None,
+                        help="start time in seconds or HH:MM:SS (default: beginning)")
+    parser.add_argument("--end", type=parse_time, default=None,
+                        help="end time in seconds or HH:MM:SS (default: end)")
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
+    validate_range(parser, args.start, args.end)
 
     if args.files:
         files = [Path(f).resolve() for f in args.files]
@@ -212,8 +393,11 @@ def main() -> None:
     output_dir = Path(args.output).resolve() if args.output else None
     language = None if args.language.lower() == "auto" else args.language
     model = load_model(args.model)
-    for f in files:
-        transcribe_file(model, f, args.model, output_dir, language)
+    try:
+        for f in files:
+            transcribe_file(model, f, args.model, output_dir, language, args.start, args.end)
+    except ValueError as error:
+        sys.exit(str(error))
     print("\nTudo pronto.")
 
 
