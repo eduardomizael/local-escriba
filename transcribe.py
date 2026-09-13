@@ -345,7 +345,7 @@ def transcribe_file(model, media: Path, model_name: str,
                     "segments": rows}, ensure_ascii=False, indent=1),
         encoding="utf-8",
     )
-    scope = "da mídia completa" if timestamps is None else f"do intervalo de {range_duration / 60:.1f} min"
+    scope = "da midia completa" if timestamps is None else f"do intervalo de {range_duration / 60:.1f} min"
     print(f"[pronto] {len(rows)} segmentos {scope} em "
           f"{(time.time() - started) / 60:.1f} min")
 
@@ -393,11 +393,11 @@ def main() -> None:
     output_dir = Path(args.output).resolve() if args.output else None
     language = None if args.language.lower() == "auto" else args.language
     model = load_model(args.model)
-    try:
-        for f in files:
+    for f in files:
+        try:
             transcribe_file(model, f, args.model, output_dir, language, args.start, args.end)
-    except ValueError as error:
-        sys.exit(str(error))
+        except ValueError as error:
+            print(f"  [pulado] {error}")
     print("\nTudo pronto.")
 
 
