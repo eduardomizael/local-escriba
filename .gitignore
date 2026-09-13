@@ -4,6 +4,9 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
+# Modelos baixados do Hugging Face (varios GB)
+models/
+
 # Midia de entrada: arquivos grandes nao vao para o repositorio
 *.mp4
 *.mkv

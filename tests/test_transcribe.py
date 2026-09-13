@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,25 @@ class FakeModel:
 
 
 class RangeOptionsTests(unittest.TestCase):
+    def test_load_model_uses_application_models_directory(self):
+        calls = []
+
+        class FakeWhisperModel:
+            def __init__(self, *args, **kwargs):
+                calls.append((args, kwargs))
+
+        with tempfile.TemporaryDirectory() as folder:
+            models_dir = Path(folder) / "models"
+            with patch.dict(sys.modules, {
+                "faster_whisper": SimpleNamespace(WhisperModel=FakeWhisperModel),
+            }), patch.object(transcribe, "DEVICE_FALLBACKS", (("cpu", "int8"),)), \
+                 patch.object(transcribe, "MODELS_DIR", models_dir):
+                transcribe.load_model("small")
+
+            self.assertTrue(models_dir.is_dir())
+            self.assertEqual(calls[0][0], ("small",))
+            self.assertEqual(calls[0][1]["download_root"], str(models_dir))
+
     def test_parser_accepts_seconds_and_hhmmss(self):
         args = transcribe.build_parser().parse_args([
             "--start", "00:11:00", "--end", "01:02:03.5",

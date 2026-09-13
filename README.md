@@ -29,7 +29,9 @@ uv sync
 ```
 
 Na primeira execução o modelo é baixado do Hugging Face (~3 GB no caso do
-`large-v3`) e fica em cache em `~/.cache/huggingface`.
+`large-v3`) para `models/`, dentro da pasta da aplicação. Nas próximas
+execuções, a cópia local é reutilizada. A pasta `models/` não entra no Git;
+para levar a ferramenta a outro computador, copie-a junto com o projeto.
 
 ## Uso
 
@@ -79,6 +81,10 @@ Cada limite aceita segundos (por exemplo, `660` ou `660.5`) ou o horário
 | `--language` | `pt` | código do idioma; `auto` deixa o modelo detectar |
 | `--start` | início da mídia | início em segundos ou `HH:MM:SS` |
 | `--end` | fim da mídia | fim em segundos ou `HH:MM:SS` |
+
+Os modelos são guardados em `models/` na raiz da aplicação. O parâmetro
+`--model` também aceita o caminho de uma pasta de modelo compatível, caso você
+queira reutilizar uma cópia que esteja fora do projeto.
 
 Se faltar VRAM, `--model medium` costuma resolver.
 

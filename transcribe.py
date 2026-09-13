@@ -33,6 +33,10 @@ DEVICE_FALLBACKS = (("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", "int8
 # Intervalo, em segundos de audio transcrito, entre as linhas de progresso.
 PROGRESS_INTERVAL_S = 300
 
+# Os modelos sao grandes e pertencem a esta instalacao da ferramenta. Manter
+# esse cache ao lado do codigo facilita backup e migracao para outra maquina.
+MODELS_DIR = Path(__file__).resolve().parent / "models"
+
 
 def setup_cuda() -> None:
     """No Windows, expoe as DLLs de cuBLAS/cuDNN vindas dos wheels da NVIDIA.
@@ -87,9 +91,15 @@ def load_model(name: str):
     except ImportError:
         sys.exit("Dependencias ausentes. Rode 'uv sync' nesta pasta primeiro.")
 
+    MODELS_DIR.mkdir(exist_ok=True)
     for device, compute_type in DEVICE_FALLBACKS:
         try:
-            model = WhisperModel(name, device=device, compute_type=compute_type)
+            model = WhisperModel(
+                name,
+                device=device,
+                compute_type=compute_type,
+                download_root=str(MODELS_DIR),
+            )
         except Exception as e:
             print(f"  [--] {device}/{compute_type}: {str(e).splitlines()[0][:110]}")
             continue
