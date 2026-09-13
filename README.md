@@ -51,6 +51,24 @@ Outra pasta de entrada, com um modelo menor:
 uv run transcribe.py --input D:/videos --model medium
 ```
 
+Transcrever somente um intervalo, em segundos:
+
+```bash
+uv run transcribe.py entrevista.mp3 --start 660 --end 930
+uv run transcribe.py entrevista.mp3 --start 00:11:00 --end 00:15:30
+```
+
+Os nomes `--start` e `--end` seguem a API do `faster-whisper`. Ambos são
+opcionais: somente `--start 660` transcreve do segundo 660 até o fim; somente
+`--end 930` transcreve do início até o segundo 930. Quando nenhum é informado,
+o arquivo completo é transcrito como antes. Para intervalos parciais, o
+aplicativo decodifica apenas a faixa solicitada antes de chamar o modelo; os
+tempos escritos nas saídas continuam sendo os tempos absolutos da mídia
+original.
+
+Cada limite aceita segundos (por exemplo, `660` ou `660.5`) ou o horário
+`HH:MM:SS` (por exemplo, `00:11:00` ou `00:11:00.500`).
+
 ## Opções
 
 | Opção | Padrão | O que faz |
@@ -59,6 +77,8 @@ uv run transcribe.py --input D:/videos --model medium
 | `--input` | `.` | pasta varrida quando nenhum arquivo é passado |
 | `--output` | ao lado da mídia | pasta onde gravar os resultados |
 | `--language` | `pt` | código do idioma; `auto` deixa o modelo detectar |
+| `--start` | início da mídia | início em segundos ou `HH:MM:SS` |
+| `--end` | fim da mídia | fim em segundos ou `HH:MM:SS` |
 
 Se faltar VRAM, `--model medium` costuma resolver.
 
@@ -84,11 +104,16 @@ O `.json` tem esta forma:
  "duration_s": 5412.3,
  "model": "large-v3",
  "language": "pt",
+ "requested_range_s": { "start": 660.0, "end": 930.0 },
  "segments": [
   { "i": 1, "start": 0.0, "end": 4.2, "text": "Bom dia a todos." }
  ]
 }
 ```
+
+Em uma transcrição completa, `requested_range_s` é `null`. Transcrições
+parciais recebem `__start-...` e/ou `__end-...` no nome dos três arquivos de
+saída, para não sobrescrever nem pular a transcrição completa já existente.
 
 ## Detalhes de implementação
 
@@ -116,6 +141,9 @@ velocidade em múltiplos do tempo real e estimativa do que falta.
 **Parâmetros deliberados.** `condition_on_previous_text=False` evita que o
 modelo entre em loop repetindo frases em trechos de silêncio ou palmas, comum
 em gravação de evento; `vad_filter=True` pula os silêncios.
+
+O VAD continua habilitado tanto para a mídia completa quanto para intervalos.
+Nos intervalos, ele é aplicado somente após a decodificação da faixa solicitada.
 
 ## Licença
 
