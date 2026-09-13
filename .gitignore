@@ -30,5 +30,6 @@ output/
 .DS_Store
 Thumbs.db
 
-# Rascunho de mensagem de commit
-_commit.txt
+# Rascunhos de texto longo (mensagem de commit, comentario de PR)
+_*.txt
+_*.md
